@@ -9,21 +9,15 @@ from utils import (
     get_recommended_projects,
     analyze_project_culture,
     generate_contribution_guidelines,
-    summarize_text
+    summarize_text,
+    translate_text_with_claude,
 )
 import config
 import boto3
 import pdfkit
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(message)s',
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 
 # Initialize session state
 if 'analyzed_projects' not in st.session_state:
@@ -42,10 +36,16 @@ s3_client = boto3.client('s3', region_name=S3_REGION_NAME)
 st.set_page_config(page_title="Open Source Contribution Guide", layout="wide")
 st.title("Open Source Contribution Guide")
 
+def format_number(num):
+    if num >= 1000000:
+        return f"{num / 1000000:.1f}M"
+    elif num >= 1000:
+        return f"{num / 1000:.1f}k"
+    else:
+        return str(num)
+
 def analyze_project(idx):
-    """Helper function to analyze a project and update session state"""
     project = st.session_state['recommended_projects'][idx]
-    
     with st.spinner(f"Analyzing culture for {project['name']}..."):
         culture_analysis = analyze_project_culture(project['name'], project['readme'])
         st.session_state['analyzed_projects'][idx]['culture_analysis'] = culture_analysis
@@ -73,6 +73,7 @@ with st.form(key='user_input_form'):
         max_value=40,
         value=5,
     )
+    target_language = st.text_input("Enter the target language for summaries (optional):", value="")
     submit_button = st.form_submit_button(label='Find Projects')
 
 # Update search_performed state when form is submitted
@@ -97,23 +98,36 @@ if submit_button:
 # Display projects if search has been performed
 if st.session_state['search_performed']:
     st.header("2. Project Recommendations")
-    
+
     if not st.session_state['recommended_projects']:
         st.warning("No projects found. Please try different inputs.")
     else:
         for idx, project in enumerate(st.session_state['recommended_projects']):
             st.subheader(f"{idx + 1}. {project['name']}")
             st.write(f"**Description:** {project['description']}")
+
+            # Format stars and forks
+            formatted_stars = format_number(project['stars'])
+            formatted_forks = format_number(project['forks'])
+            st.write(f"**Stars:** {formatted_stars} ⭐")
+            st.write(f"**Forks:** {formatted_forks} 🍴")
             st.write(f"**URL:** [{project['url']}]({project['url']})")
-            
+
             with st.spinner(f"Generating summary for {project['name']}..."):
                 summary = summarize_text(project['readme'])
-            st.markdown("**Summary:**")
-            st.write(summary)
+
+            # Translation option
+            if target_language.strip():
+                translated_summary = translate_text_with_claude(summary, target_language)
+                st.markdown(f"**Summary ({target_language}):**")
+                st.write(translated_summary)
+            else:
+                st.markdown("**Summary:**")
+                st.write(summary)
 
             # Create unique key for analyze button
             analyze_key = f"analyze_button_{idx}"
-            
+
             # Check if project has been analyzed
             project_data = st.session_state['analyzed_projects'].get(idx, {})
             if project_data.get('culture_analysis') is None:
@@ -152,7 +166,7 @@ if st.session_state['search_performed']:
                             template = Template(f.read())
 
                         html_content = template.render(projects=project_data)
-                        
+
                         # Setup paths
                         output_dir = os.path.join(os.getcwd(), 'output_files')
                         os.makedirs(output_dir, exist_ok=True)
@@ -163,14 +177,14 @@ if st.session_state['search_performed']:
                         with open(html_path, 'w', encoding='utf-8') as f:
                             f.write(html_content)
 
-                        wkhtmltopdf_path = '/usr/bin/wkhtmltopdf'
+                        wkhtmltopdf_path = '/usr/local/bin/wkhtmltopdf'  # Update if necessary
                         config_pdfkit = pdfkit.configuration(wkhtmltopdf=wkhtmltopdf_path)
                         pdfkit.from_file(html_path, pdf_path, configuration=config_pdfkit)
 
                         # Upload to S3
                         s3_key = f'project_details_{int(time.time())}.pdf'
                         s3_client.upload_file(pdf_path, S3_BUCKET_NAME, s3_key)
-                        
+
                         # Generate download link
                         presigned_url = s3_client.generate_presigned_url(
                             'get_object',
